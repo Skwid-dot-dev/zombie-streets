@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Zombie Apocalypse - Point & Click Survival</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
     <style>
         * {
             margin: 0;
@@ -475,6 +476,7 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
     <script>
         // Game state
         let gameState = {
@@ -484,7 +486,8 @@
                 health: 100,
                 stamina: 100,
                 hunger: 100,
-                isMoving: false
+                isMoving: false,
+                moveSpeed: 15 // meters per second
             },
             inventory: {
                 '🎒 Backpack': 1,
@@ -524,6 +527,181 @@
             icon: playerIcon,
             zIndexOffset: 1000
         }).addTo(map);
+
+        // After playerMarker is defined
+        let routingControl = L.Routing.control({
+            // Waypoints will be set dynamically
+            waypoints: [], 
+            // We will use the OSRM demo server for now.
+            // Note: This demo server can be unreliable. If issues arise,
+            // we may need to configure a different routing service.
+            router: L.Routing.osrmv1({
+                serviceUrl: 'https://router.project-osrm.org/route/v1' 
+            }),
+            // Do not add the control to the map visually, as we'll use it programmatically.
+            addWaypoints: false, // Prevent adding waypoints via UI
+            draggableWaypoints: false, // Prevent dragging waypoints
+            routeWhileDragging: false, // Disable dragging-based routing
+            show: false, // Attempt to hide the control UI (itinerary, etc.)
+            fitSelectedRoutes: false, // Do not zoom to the route automatically
+            lineOptions: { // Style the route line
+                styles: [
+                    {color: 'yellow', opacity: 0.7, weight: 6, dashArray: '10, 10'}
+                ]
+            }
+        }); // Do NOT call .addTo(map) here if we want it to be hidden initially,
+            // as the line should be drawn by the routing machine plugin itself.
+
+        // To effectively hide the control's UI if it were added to the map:
+        // If it needs to be added for event handling, apply CSS to hide it:
+        // Create a dummy div to attach the control to, then hide that div.
+        // However, the library might allow creating it without adding to map.
+        // For now, let's assume not adding it to map is enough.
+        // We will trigger routing programmatically.
+
+        routingControl.on('routesfound', function(e) {
+            const routes = e.routes;
+            if (routes.length === 0) {
+                addLogEntry('No route could be found.', 'warning');
+                gameState.player.isMoving = false;
+                document.body.classList.remove('moving-cursor');
+                return;
+            }
+
+            const route = routes[0];
+            addLogEntry(`Route found: ${Math.round(route.summary.totalDistance)}m. Moving...`, 'info');
+            
+            // Update distance info display if available
+            const distanceInfoEl = document.getElementById('distanceInfo');
+            if (distanceInfoEl) {
+                distanceInfoEl.textContent = `Path: ${Math.round(route.summary.totalDistance)}m`;
+            }
+            
+            animateMovement(route.coordinates, route.summary.totalDistance);
+        });
+
+        routingControl.on('routingerror', function(e) {
+            addLogEntry(`Routing error: ${e.error.message || 'Could not find a route.'}`, 'danger');
+            gameState.player.isMoving = false;
+            document.body.classList.remove('moving-cursor');
+            // Potentially clear the waypoints if a partial route was drawn or something
+            // routingControl.setWaypoints([]); 
+        });
+
+
+        let animationFrameId = null; // To control the animation loop
+
+        function animateMovement(pathCoordinates, totalPathDistance) {
+            let currentPathIndex = 0;
+            let distanceCoveredInCurrentSegment = 0;
+            let totalDistanceCovered = 0;
+            let lastTimestamp = performance.now();
+
+            // Initial stamina cost (the one checked in movePlayerTo) can be deducted here,
+            // or we can make stamina purely based on distance moved during animation.
+            // For now, let's assume the initial check in movePlayerTo was a gate,
+            // and actual cost is per meter moved.
+            // const initialStaminaForAttempt = Math.min(Math.floor(totalPathDistance / 20), 25); // This was removed from movePlayerTo
+            // if (gameState.player.stamina < initialStaminaForAttempt) { // This check is now removed
+            //      addLogEntry('Not enough stamina to start movement!', 'warning');
+            //      gameState.player.isMoving = false;
+            //      document.body.classList.remove('moving-cursor');
+            //      return;
+            // }
+            // Decided to make stamina cost purely based on actual movement in the loop below.
+
+            function animationStep(timestamp) {
+                const deltaTime = (timestamp - lastTimestamp) / 1000; // seconds
+                lastTimestamp = timestamp;
+
+                if (currentPathIndex >= pathCoordinates.length - 1) {
+                    // Reached destination
+                    playerMarker.setLatLng(pathCoordinates[pathCoordinates.length - 1]);
+                    gameState.player.lat = pathCoordinates[pathCoordinates.length - 1].lat;
+                    gameState.player.lng = pathCoordinates[pathCoordinates.length - 1].lng;
+                    
+                    addLogEntry(`Arrived at destination. Total distance: ${Math.round(totalPathDistance)}m.`, 'success');
+                    completeMovement();
+                    return;
+                }
+
+                const playerCurrentLatLng = playerMarker.getLatLng();
+                const nextWaypointLatLng = pathCoordinates[currentPathIndex + 1];
+                
+                let distanceToNextWaypoint = playerCurrentLatLng.distanceTo(nextWaypointLatLng);
+                let segmentMoveDistance = gameState.player.moveSpeed * deltaTime;
+
+                // Stamina cost for this frame's movement: e.g. 1 stamina per 10 meters
+                const staminaCostThisFrame = (segmentMoveDistance / 10) * 1; 
+                if (gameState.player.stamina < staminaCostThisFrame) {
+                    addLogEntry('Ran out of stamina mid-journey!', 'warning');
+                    completeMovement(); // Stop movement
+                    return;
+                }
+                gameState.player.stamina = Math.max(0, gameState.player.stamina - staminaCostThisFrame);
+                // updateUI(); // updateUI is called in completeMovement and periodically by gameLoop
+
+                if (segmentMoveDistance >= distanceToNextWaypoint) {
+                    // Jump to the next waypoint and prepare for the next segment
+                    playerMarker.setLatLng(nextWaypointLatLng);
+                    totalDistanceCovered += distanceToNextWaypoint;
+                    currentPathIndex++;
+                    distanceCoveredInCurrentSegment = 0; // Reset for new segment
+                    if (currentPathIndex >= pathCoordinates.length - 1) { // Check again if it was the last segment
+                         gameState.player.lat = nextWaypointLatLng.lat;
+                         gameState.player.lng = nextWaypointLatLng.lng;
+                         addLogEntry(`Arrived at destination. Total distance: ${Math.round(totalPathDistance)}m.`, 'success');
+                         completeMovement();
+                         return;
+                    }
+                } else {
+                    // Move along the current segment
+                    const bearing = L.GeometryUtil.bearing(playerCurrentLatLng, nextWaypointLatLng);
+                    const newLatLng = L.GeometryUtil.destination(playerCurrentLatLng, bearing, segmentMoveDistance);
+                    playerMarker.setLatLng(newLatLng);
+                    totalDistanceCovered += segmentMoveDistance;
+                    distanceCoveredInCurrentSegment += segmentMoveDistance;
+                }
+                
+                gameState.player.lat = playerMarker.getLatLng().lat;
+                gameState.player.lng = playerMarker.getLatLng().lng;
+
+                // Update distance info if available
+                const distanceInfoEl = document.getElementById('distanceInfo');
+                if (distanceInfoEl) {
+                    const remainingDistance = totalPathDistance - totalDistanceCovered;
+                    distanceInfoEl.textContent = `Moving... ${Math.round(remainingDistance)}m remaining.`;
+                }
+                
+                updateUI(); // Continuous UI update during movement for stamina bar etc.
+                animationFrameId = requestAnimationFrame(animationStep);
+            }
+
+            // Cancel any previous animation
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+            animationFrameId = requestAnimationFrame(animationStep);
+        }
+
+        function completeMovement() {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+            gameState.player.isMoving = false;
+            document.body.classList.remove('moving-cursor');
+            updateUI(); // Final UI update
+
+            const distanceInfoEl = document.getElementById('distanceInfo');
+            if (distanceInfoEl) {
+                distanceInfoEl.textContent = 'Click to move around'; // Reset
+            }
+
+            if (Math.random() < 0.1) { 
+                encounterZombie();
+            }
+        }
 
         // Building types and loot tables
         const buildingTypes = {
@@ -686,42 +864,37 @@
         }
 
         async function movePlayerTo(lat, lng) {
-            if (gameState.player.isMoving) return;
-            
-            const distance = map.distance([gameState.player.lat, gameState.player.lng], [lat, lng]);
-            const staminaCost = Math.min(Math.floor(distance / 20), 25);
-            
-            if (gameState.player.stamina < staminaCost) {
-                addLogEntry('Not enough stamina to move that far!', 'warning');
+            if (gameState.player.isMoving) return false; // Return false if already moving
+
+            // const distanceToTarget = map.distance([gameState.player.lat, gameState.player.lng], [lat, lng]);
+            // const staminaCost = Math.min(Math.floor(distanceToTarget / 20), 25); // Removed this line
+
+            // A minimal stamina check to even attempt, e.g., must have at least 1 stamina
+            if (gameState.player.stamina <= 0) { 
+                addLogEntry('Not enough stamina to even attempt moving!', 'warning');
                 return false;
             }
-            
+
             gameState.player.isMoving = true;
             document.body.classList.add('moving-cursor');
+            addLogEntry('Calculating route...', 'info');
+
+            // Clear previous routes if any (important if the route line was ever displayed)
+            // routingControl.setWaypoints([]); // This might clear the line from the map if it was drawn
+
+            routingControl.setWaypoints([
+                L.latLng(gameState.player.lat, gameState.player.lng),
+                L.latLng(lat, lng)
+            ]);
+
+            // The actual movement/animation will be triggered by an event listener 
+            // on routingControl (e.g., 'routesfound') which will be set up in the next step.
+            // For now, this function initiates the routing.
+
+            // The old logic for consuming stamina, updating player state,
+            // and random zombie encounter will be moved to the path following logic.
             
-            // Update player position
-            gameState.player.lat = lat;
-            gameState.player.lng = lng;
-            playerMarker.setLatLng([lat, lng]);
-            
-            // Consume stamina
-            gameState.player.stamina = Math.max(0, gameState.player.stamina - staminaCost);
-            updateUI();
-            
-            addLogEntry(`Moved ${Math.round(distance)}m (Cost: ${staminaCost} stamina)`, 'info');
-            
-            // Simulate movement time
-            setTimeout(() => {
-                gameState.player.isMoving = false;
-                document.body.classList.remove('moving-cursor');
-                
-                // Random zombie encounter chance
-                if (Math.random() < 0.1) {
-                    encounterZombie();
-                }
-            }, 1000);
-            
-            return true;
+            return true; // Indicate that movement process has started
         }
 
         function interactWithBuilding(building, lat, lng) {
