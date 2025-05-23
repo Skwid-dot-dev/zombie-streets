@@ -49,6 +49,10 @@
             cursor: pointer !important;
         }
 
+        .leaflet-routing-container {
+            display: none !important;
+        }
+
         #sidebar {
             width: 320px;
             background: #0d1117;
@@ -549,7 +553,7 @@
                     {color: 'yellow', opacity: 0.7, weight: 6, dashArray: '10, 10'}
                 ]
             }
-        }); // Do NOT call .addTo(map) here if we want it to be hidden initially,
+        }).addTo(map);
             // as the line should be drawn by the routing machine plugin itself.
 
         // To effectively hide the control's UI if it were added to the map:
